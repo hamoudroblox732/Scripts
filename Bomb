@@ -1,0 +1,970 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+
+local PASSWORD = "BOM"
+local TRIGGER_TIME = 4
+local DETECTION_DISTANCE = 35
+local ESCAPE_SPEED = 28
+local ESCAPE_DISTANCE = 70
+local SPIN_SPEED = math.rad(10000000)
+
+local enabled = false
+local unlocked = false
+local currentMode = "PLAY"
+local spinning = false
+local escapeDirection = nil
+local escapeTarget = nil
+local lastToolState = false
+local rainbowTime = 0
+local lastEscapeTime = 0
+
+local function getCharacter()
+	return player.Character
+end
+
+local function getHumanoid(character)
+	if not character then return nil end
+	return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot(character)
+	if not character then return nil end
+	return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getInventoryTool()
+	local backpack = player:FindFirstChildOfClass("Backpack")
+
+	if backpack then
+		for _, item in ipairs(backpack:GetChildren()) do
+			if item:IsA("Tool") then
+				return item
+			end
+		end
+	end
+
+	local character = getCharacter()
+
+	if character then
+		for _, item in ipairs(character:GetChildren()) do
+			if item:IsA("Tool") then
+				return item
+			end
+		end
+	end
+
+	return nil
+end
+
+local function getHeldTool()
+	local character = getCharacter()
+
+	if not character then return nil end
+
+	for _, item in ipairs(character:GetChildren()) do
+		if item:IsA("Tool") then
+			return item
+		end
+	end
+
+	return nil
+end
+
+local function getNearestPlayer()
+	local character = getCharacter()
+	local root = getRoot(character)
+
+	if not root then
+		return nil, math.huge
+	end
+
+	local nearest = nil
+	local nearestDistance = DETECTION_DISTANCE
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		if otherPlayer ~= player then
+			local otherCharacter = otherPlayer.Character
+			local otherRoot = getRoot(otherCharacter)
+
+			if otherRoot then
+				local distance =
+					(otherRoot.Position - root.Position).Magnitude
+
+				if distance < nearestDistance then
+					nearest = otherPlayer
+					nearestDistance = distance
+				end
+			end
+		end
+	end
+
+	return nearest, nearestDistance
+end
+
+local function findTimer()
+	local character = getCharacter()
+	local playerGui = player:FindFirstChildOfClass("PlayerGui")
+	local containers = {}
+
+	if character then
+		table.insert(containers, character)
+	end
+
+	if playerGui then
+		table.insert(containers, playerGui)
+	end
+
+	for _, container in ipairs(containers) do
+		for _, object in ipairs(container:GetDescendants()) do
+			local name = string.lower(object.Name)
+
+			if object:IsA("NumberValue")
+				or object:IsA("IntValue") then
+
+				if string.find(name, "timer")
+					or string.find(name, "time")
+					or string.find(name, "count")
+					or string.find(name, "second") then
+
+					return object.Value
+				end
+			end
+
+			if object:IsA("TextLabel")
+				or object:IsA("TextButton")
+				or object:IsA("TextBox") then
+
+				if string.find(name, "timer")
+					or string.find(name, "time")
+					or string.find(name, "count")
+					or string.find(name, "second") then
+
+					local number =
+						tonumber(string.match(object.Text, "%d+"))
+
+					if number then
+						return number
+					end
+				end
+			end
+		end
+	end
+
+	for _, attribute in ipairs({
+		"Timer",
+		"Time",
+		"Countdown",
+		"CountDown",
+		"Seconds",
+		"Second"
+	}) do
+		local value = player:GetAttribute(attribute)
+
+		if typeof(value) == "number" then
+			return value
+		end
+	end
+
+	return nil
+end
+
+local function startSpin()
+	spinning = true
+end
+
+local function stopSpin()
+	spinning = false
+end
+
+local function doSpin()
+	if not enabled then return end
+	if currentMode ~= "AUTO" then return end
+	if not spinning then return end
+
+	local character = getCharacter()
+	local root = getRoot(character)
+
+	if not root then return end
+
+	root.CFrame =
+		CFrame.new(root.Position) *
+		CFrame.Angles(
+			0,
+			SPIN_SPEED * os.clock(),
+			0
+		)
+end
+
+local function getClearDirection(character, direction)
+	local root = getRoot(character)
+
+	if not root then
+		return direction
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {character}
+
+	local result = workspace:Raycast(
+		root.Position,
+		direction.Unit * 12,
+		params
+	)
+
+	if not result then
+		return direction.Unit
+	end
+
+	local right = Vector3.new(
+		-direction.Z,
+		0,
+		direction.X
+	)
+
+	local choices = {
+		(direction + right).Unit,
+		(direction - right).Unit,
+		right.Unit,
+		(-right).Unit
+	}
+
+	for _, choice in ipairs(choices) do
+		local check =
+			workspace:Raycast(
+				root.Position,
+				choice * 12,
+				params
+			)
+
+		if not check then
+			return choice
+		end
+	end
+
+	return direction.Unit
+end
+
+local function createEscapeTarget(character, targetCharacter)
+	local root = getRoot(character)
+	local targetRoot = getRoot(targetCharacter)
+
+	if not root or not targetRoot then
+		return nil, nil
+	end
+
+	local away =
+		root.Position - targetRoot.Position
+
+	away = Vector3.new(
+		away.X,
+		0,
+		away.Z
+	)
+
+	if away.Magnitude < 0.1 then
+		away = -root.CFrame.LookVector
+
+		away = Vector3.new(
+			away.X,
+			0,
+			away.Z
+		)
+	end
+
+	if away.Magnitude < 0.1 then
+		return nil, nil
+	end
+
+	away = away.Unit
+
+	local safeDirection =
+		getClearDirection(
+			character,
+			away
+		)
+
+	local targetPosition =
+		root.Position +
+		safeDirection * ESCAPE_DISTANCE
+
+	return safeDirection, targetPosition
+end
+
+local function playMode()
+	if not enabled then return end
+
+	local character = getCharacter()
+	local humanoid = getHumanoid(character)
+	local root = getRoot(character)
+
+	if not character or not humanoid or not root then
+		return
+	end
+
+	if humanoid.Health <= 0 then
+		return
+	end
+
+	humanoid.WalkSpeed = ESCAPE_SPEED
+
+	local nearestPlayer, distance =
+		getNearestPlayer()
+
+	if nearestPlayer then
+		local targetCharacter =
+			nearestPlayer.Character
+
+		local targetRoot =
+			getRoot(targetCharacter)
+
+		if targetRoot then
+			local now = os.clock()
+
+			local shouldUpdate =
+				not escapeTarget
+				or now - lastEscapeTime >= 0.08
+				or distance <= 12
+				or (escapeTarget - root.Position).Magnitude < 10
+
+			if shouldUpdate then
+				local direction, target =
+					createEscapeTarget(
+						character,
+						targetCharacter
+					)
+
+				if direction and target then
+					escapeDirection = direction
+					escapeTarget = target
+					lastEscapeTime = now
+				end
+			end
+
+			if escapeTarget then
+				humanoid:MoveTo(escapeTarget)
+			end
+
+			if distance <= 10 then
+				local direction, target =
+					createEscapeTarget(
+						character,
+						targetCharacter
+					)
+
+				if direction and target then
+					escapeDirection = direction
+					escapeTarget = target
+					lastEscapeTime = now
+
+					humanoid:MoveTo(escapeTarget)
+				end
+			end
+
+			return
+		end
+	end
+
+	if escapeTarget then
+		if (escapeTarget - root.Position).Magnitude < 8 then
+			escapeTarget =
+				root.Position +
+				escapeDirection * ESCAPE_DISTANCE
+		end
+
+		humanoid:MoveTo(escapeTarget)
+		return
+	end
+
+	local forward =
+		Vector3.new(
+			root.CFrame.LookVector.X,
+			0,
+			root.CFrame.LookVector.Z
+		)
+
+	if forward.Magnitude < 0.1 then
+		forward = Vector3.new(0, 0, -1)
+	end
+
+	escapeDirection =
+		getClearDirection(
+			character,
+			forward.Unit
+		)
+
+	escapeTarget =
+		root.Position +
+		escapeDirection * ESCAPE_DISTANCE
+
+	humanoid:MoveTo(escapeTarget)
+end
+
+local function updateMode()
+	local tool = getInventoryTool()
+	local hasTool = tool ~= nil
+
+	if hasTool then
+		currentMode = "AUTO"
+	else
+		currentMode = "PLAY"
+	end
+
+	if hasTool ~= lastToolState then
+		lastToolState = hasTool
+
+		if not hasTool then
+			stopSpin()
+			escapeDirection = nil
+			escapeTarget = nil
+			lastEscapeTime = 0
+		end
+	end
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "LESS"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local function corner(object, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius)
+	c.Parent = object
+end
+
+local function stroke(object, color, transparency, thickness)
+	local s = Instance.new("UIStroke")
+	s.Color = color
+	s.Transparency = transparency
+	s.Thickness = thickness
+	s.Parent = object
+end
+
+local function label(parent, text, size, position, textSize, color, font)
+	local l = Instance.new("TextLabel")
+	l.Size = size
+	l.Position = position
+	l.BackgroundTransparency = 1
+	l.Text = text
+	l.TextColor3 = color
+	l.TextSize = textSize
+	l.Font = font
+	l.ZIndex = 10
+	l.Parent = parent
+	return l
+end
+
+local login = Instance.new("Frame")
+login.Size = UDim2.new(0, 310, 0, 225)
+login.Position = UDim2.new(0.5, -155, 0.5, -112)
+login.BackgroundColor3 = Color3.fromRGB(10, 12, 17)
+login.BorderSizePixel = 0
+login.ZIndex = 2
+login.Parent = gui
+
+corner(login, 18)
+stroke(login, Color3.fromRGB(55, 75, 105), 0.1, 1.5)
+
+local loginHeader = Instance.new("Frame")
+loginHeader.Size = UDim2.new(1, 0, 0, 65)
+loginHeader.BackgroundColor3 = Color3.fromRGB(18, 25, 37)
+loginHeader.BorderSizePixel = 0
+loginHeader.ZIndex = 3
+loginHeader.Parent = login
+
+corner(loginHeader, 18)
+
+local loginTitle =
+	label(
+		loginHeader,
+		"LESS",
+		UDim2.new(1, -30, 0, 32),
+		UDim2.new(0, 16, 0, 5),
+		25,
+		Color3.fromRGB(245, 248, 255),
+		Enum.Font.GothamBlack
+	)
+
+loginTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local loginSub =
+	label(
+		loginHeader,
+		"SECURE ACCESS  •  PRIVATE SYSTEM",
+		UDim2.new(1, -30, 0, 15),
+		UDim2.new(0, 17, 0, 42),
+		8,
+		Color3.fromRGB(95, 130, 175),
+		Enum.Font.GothamBold
+	)
+
+loginSub.TextXAlignment = Enum.TextXAlignment.Left
+
+local enter =
+	label(
+		login,
+		"ENTER PASSWORD",
+		UDim2.new(1, -40, 0, 20),
+		UDim2.new(0, 20, 0, 78),
+		12,
+		Color3.fromRGB(190, 198, 212),
+		Enum.Font.GothamBold
+	)
+
+enter.TextXAlignment = Enum.TextXAlignment.Left
+
+local passwordBox = Instance.new("TextBox")
+passwordBox.Size = UDim2.new(1, -40, 0, 42)
+passwordBox.Position = UDim2.new(0, 20, 0, 102)
+passwordBox.BackgroundColor3 = Color3.fromRGB(20, 23, 30)
+passwordBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+passwordBox.PlaceholderText = "PASSWORD"
+passwordBox.PlaceholderColor3 = Color3.fromRGB(85, 94, 108)
+passwordBox.Text = ""
+passwordBox.TextSize = 14
+passwordBox.Font = Enum.Font.GothamBold
+passwordBox.ClearTextOnFocus = false
+passwordBox.TextXAlignment = Enum.TextXAlignment.Left
+passwordBox.ZIndex = 10
+passwordBox.Parent = login
+
+corner(passwordBox, 10)
+stroke(passwordBox, Color3.fromRGB(55, 70, 92), 0.15, 1)
+
+local unlock = Instance.new("TextButton")
+unlock.Size = UDim2.new(1, -40, 0, 42)
+unlock.Position = UDim2.new(0, 20, 0, 153)
+unlock.BackgroundColor3 = Color3.fromRGB(35, 105, 210)
+unlock.Text = "UNLOCK  ›"
+unlock.TextColor3 = Color3.fromRGB(255, 255, 255)
+unlock.TextSize = 14
+unlock.Font = Enum.Font.GothamBlack
+unlock.AutoButtonColor = false
+unlock.ZIndex = 10
+unlock.Parent = login
+
+corner(unlock, 10)
+stroke(unlock, Color3.fromRGB(90, 155, 255), 0.2, 1)
+
+local loginFooter =
+	label(
+		login,
+		"LESS AUTOMATION SYSTEM",
+		UDim2.new(1, -40, 0, 15),
+		UDim2.new(0, 20, 0, 202),
+		8,
+		Color3.fromRGB(65, 75, 90),
+		Enum.Font.GothamBold
+	)
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.new(0, 335, 0, 420)
+panel.Position = UDim2.new(0.5, -167, 0.5, -210)
+panel.BackgroundColor3 = Color3.fromRGB(9, 11, 16)
+panel.BorderSizePixel = 0
+panel.Visible = false
+panel.ZIndex = 2
+panel.Parent = gui
+
+corner(panel, 20)
+stroke(panel, Color3.fromRGB(55, 72, 95), 0.08, 1.5)
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 76)
+header.BackgroundColor3 = Color3.fromRGB(18, 25, 37)
+header.BorderSizePixel = 0
+header.Active = true
+header.ZIndex = 3
+header.Parent = panel
+
+corner(header, 20)
+
+local title =
+	label(
+		header,
+		"LESS",
+		UDim2.new(1, -70, 0, 34),
+		UDim2.new(0, 20, 0, 6),
+		27,
+		Color3.fromRGB(245, 248, 255),
+		Enum.Font.GothamBlack
+	)
+
+title.TextXAlignment = Enum.TextXAlignment.Left
+
+local subtitle =
+	label(
+		header,
+		"AUTOMATION CONTROL CENTER",
+		UDim2.new(1, -70, 0, 16),
+		UDim2.new(0, 21, 0, 46),
+		8,
+		Color3.fromRGB(95, 130, 175),
+		Enum.Font.GothamBold
+	)
+
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local close = Instance.new("TextButton")
+close.Size = UDim2.new(0, 43, 0, 43)
+close.Position = UDim2.new(1, -55, 0, 16)
+close.BackgroundColor3 = Color3.fromRGB(28, 31, 39)
+close.Text = "×"
+close.TextColor3 = Color3.fromRGB(215, 220, 230)
+close.TextSize = 25
+close.Font = Enum.Font.GothamBold
+close.AutoButtonColor = false
+close.ZIndex = 12
+close.Parent = header
+
+corner(close, 12)
+stroke(close, Color3.fromRGB(70, 80, 96), 0.2, 1)
+
+local systemLabel =
+	label(
+		panel,
+		"SYSTEM STATUS",
+		UDim2.new(1, -40, 0, 18),
+		UDim2.new(0, 20, 0, 89),
+		9,
+		Color3.fromRGB(105, 115, 130),
+		Enum.Font.GothamBold
+	)
+
+systemLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local powerButton = Instance.new("TextButton")
+powerButton.Size = UDim2.new(1, -40, 0, 50)
+powerButton.Position = UDim2.new(0, 20, 0, 111)
+powerButton.BackgroundColor3 = Color3.fromRGB(50, 27, 32)
+powerButton.Text = "SYSTEM  •  OFF"
+powerButton.TextColor3 = Color3.fromRGB(245, 247, 252)
+powerButton.TextSize = 14
+powerButton.Font = Enum.Font.GothamBlack
+powerButton.AutoButtonColor = false
+powerButton.ZIndex = 10
+powerButton.Parent = panel
+
+corner(powerButton, 11)
+stroke(powerButton, Color3.fromRGB(120, 55, 65), 0.15, 1)
+
+local modes =
+	label(
+		panel,
+		"LIVE MODES",
+		UDim2.new(1, -40, 0, 18),
+		UDim2.new(0, 20, 0, 176),
+		9,
+		Color3.fromRGB(105, 115, 130),
+		Enum.Font.GothamBold
+	)
+
+modes.TextXAlignment = Enum.TextXAlignment.Left
+
+local autoButton = Instance.new("TextButton")
+autoButton.Size = UDim2.new(1, -40, 0, 50)
+autoButton.Position = UDim2.new(0, 20, 0, 198)
+autoButton.BackgroundColor3 = Color3.fromRGB(20, 24, 31)
+autoButton.Text = "AUTO   •   WAITING"
+autoButton.TextColor3 = Color3.fromRGB(180, 190, 205)
+autoButton.TextSize = 14
+autoButton.Font = Enum.Font.GothamBlack
+autoButton.AutoButtonColor = false
+autoButton.ZIndex = 10
+autoButton.Parent = panel
+
+corner(autoButton, 11)
+stroke(autoButton, Color3.fromRGB(55, 68, 88), 0.15, 1)
+
+local playButton = Instance.new("TextButton")
+playButton.Size = UDim2.new(1, -40, 0, 50)
+playButton.Position = UDim2.new(0, 20, 0, 257)
+playButton.BackgroundColor3 = Color3.fromRGB(20, 24, 31)
+playButton.Text = "PLAY   •   WAITING"
+playButton.TextColor3 = Color3.fromRGB(180, 190, 205)
+playButton.TextSize = 14
+playButton.Font = Enum.Font.GothamBlack
+playButton.AutoButtonColor = false
+playButton.ZIndex = 10
+playButton.Parent = panel
+
+corner(playButton, 11)
+stroke(playButton, Color3.fromRGB(55, 68, 88), 0.15, 1)
+
+local rightsBox = Instance.new("Frame")
+rightsBox.Size = UDim2.new(1, -40, 0, 75)
+rightsBox.Position = UDim2.new(0, 20, 0, 316)
+rightsBox.BackgroundColor3 = Color3.fromRGB(14, 17, 23)
+rightsBox.BorderSizePixel = 0
+rightsBox.ZIndex = 5
+rightsBox.Parent = panel
+
+corner(rightsBox, 12)
+stroke(rightsBox, Color3.fromRGB(50, 65, 85), 0.1, 1)
+
+local rightsLabel =
+	label(
+		rightsBox,
+		"CREATOR  •  RIGHTS",
+		UDim2.new(1, 0, 0, 17),
+		UDim2.new(0, 0, 0, 7),
+		8,
+		Color3.fromRGB(105, 115, 130),
+		Enum.Font.GothamBold
+	)
+
+local rightsName =
+	label(
+		rightsBox,
+		"HAMOUD",
+		UDim2.new(1, 0, 0, 38),
+		UDim2.new(0, 0, 0, 28),
+		24,
+		Color3.fromRGB(255, 255, 255),
+		Enum.Font.GothamBlack
+	)
+
+local footer =
+	label(
+		panel,
+		"LESS  /  AUTOMATIC MODE SYSTEM",
+		UDim2.new(1, -40, 0, 15),
+		UDim2.new(0, 20, 0, 400),
+		8,
+		Color3.fromRGB(60, 70, 85),
+		Enum.Font.GothamBold
+	)
+
+local mini = Instance.new("TextButton")
+mini.Size = UDim2.new(0, 64, 0, 64)
+mini.Position = UDim2.new(0, 20, 0.5, -32)
+mini.BackgroundColor3 = Color3.fromRGB(10, 13, 19)
+mini.Text = "LESS"
+mini.TextColor3 = Color3.fromRGB(255, 255, 255)
+mini.TextSize = 14
+mini.Font = Enum.Font.GothamBlack
+mini.Visible = false
+mini.AutoButtonColor = false
+mini.ZIndex = 20
+mini.Parent = gui
+
+corner(mini, 100)
+stroke(mini, Color3.fromRGB(55, 110, 190), 0.05, 1.5)
+
+local function makeDraggable(handle, target)
+	local dragging = false
+	local dragStart
+	local startPosition
+	local activeInput
+
+	handle.Active = true
+
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch
+			or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+			dragging = true
+			activeInput = input
+			dragStart = input.Position
+			startPosition = target.Position
+		end
+	end)
+
+	handle.InputEnded:Connect(function(input)
+		if input == activeInput then
+			dragging = false
+			activeInput = nil
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+
+		if input.UserInputType ~= Enum.UserInputType.Touch
+			and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return
+		end
+
+		local delta =
+			input.Position - dragStart
+
+		target.Position = UDim2.new(
+			startPosition.X.Scale,
+			startPosition.X.Offset + delta.X,
+			startPosition.Y.Scale,
+			startPosition.Y.Offset + delta.Y
+		)
+	end)
+end
+
+makeDraggable(loginHeader, login)
+makeDraggable(header, panel)
+
+unlock.MouseButton1Click:Connect(function()
+	if passwordBox.Text == PASSWORD then
+		unlocked = true
+		login.Visible = false
+		panel.Visible = true
+		passwordBox.Text = ""
+	end
+end)
+
+powerButton.MouseButton1Click:Connect(function()
+	enabled = not enabled
+
+	if not enabled then
+		stopSpin()
+		escapeDirection = nil
+		escapeTarget = nil
+	end
+end)
+
+close.MouseButton1Click:Connect(function()
+	panel.Visible = false
+	mini.Visible = true
+end)
+
+mini.MouseButton1Click:Connect(function()
+	panel.Visible = true
+	mini.Visible = false
+end)
+
+player.CharacterAdded:Connect(function()
+	task.wait(0.5)
+
+	escapeDirection = nil
+	escapeTarget = nil
+	spinning = false
+	lastEscapeTime = 0
+end)
+
+RunService.Heartbeat:Connect(function()
+	if not unlocked then
+		return
+	end
+
+	if not enabled then
+		powerButton.Text = "SYSTEM  •  OFF"
+		powerButton.BackgroundColor3 =
+			Color3.fromRGB(50, 27, 32)
+
+		autoButton.Text = "AUTO   •   OFF"
+		autoButton.BackgroundColor3 =
+			Color3.fromRGB(20, 24, 31)
+
+		playButton.Text = "PLAY   •   OFF"
+		playButton.BackgroundColor3 =
+			Color3.fromRGB(20, 24, 31)
+
+		stopSpin()
+		return
+	end
+
+	powerButton.Text = "SYSTEM  •  ON"
+	powerButton.BackgroundColor3 =
+		Color3.fromRGB(25, 90, 57)
+
+	updateMode()
+
+	if currentMode == "AUTO" then
+		autoButton.Text = "AUTO   •   ACTIVE"
+		autoButton.BackgroundColor3 =
+			Color3.fromRGB(25, 90, 57)
+		autoButton.TextColor3 =
+			Color3.fromRGB(225, 255, 235)
+
+		playButton.Text = "PLAY   •   WAITING"
+		playButton.BackgroundColor3 =
+			Color3.fromRGB(20, 24, 31)
+		playButton.TextColor3 =
+			Color3.fromRGB(150, 160, 175)
+
+		local tool = getInventoryTool()
+		local heldTool = getHeldTool()
+
+		if tool and not heldTool then
+			local character = getCharacter()
+			local humanoid = getHumanoid(character)
+
+			if humanoid then
+				humanoid:EquipTool(tool)
+			end
+		end
+
+		local character = getCharacter()
+		local humanoid = getHumanoid(character)
+		local root = getRoot(character)
+
+		if humanoid and root then
+			local nearestPlayer =
+				getNearestPlayer()
+
+			if nearestPlayer then
+				local targetRoot =
+					getRoot(nearestPlayer.Character)
+
+				if targetRoot then
+					humanoid:MoveTo(
+						targetRoot.Position
+					)
+				end
+			end
+		end
+
+		local timer = findTimer()
+
+		if timer
+			and timer > 0
+			and timer <= TRIGGER_TIME then
+
+			startSpin()
+		else
+			stopSpin()
+		end
+	else
+		autoButton.Text = "AUTO   •   WAITING"
+		autoButton.BackgroundColor3 =
+			Color3.fromRGB(20, 24, 31)
+		autoButton.TextColor3 =
+			Color3.fromRGB(150, 160, 175)
+
+		playButton.Text = "PLAY   •   ACTIVE"
+		playButton.BackgroundColor3 =
+			Color3.fromRGB(25, 90, 57)
+		playButton.TextColor3 =
+			Color3.fromRGB(225, 255, 235)
+
+		stopSpin()
+		playMode()
+	end
+
+	doSpin()
+end)
+
+RunService.RenderStepped:Connect(function(deltaTime)
+	rainbowTime += deltaTime * 1.5
+
+	local r =
+		math.sin(rainbowTime) * 127 + 128
+
+	local g =
+		math.sin(rainbowTime + 2) * 127 + 128
+
+	local b =
+		math.sin(rainbowTime + 4) * 127 + 128
+
+	local color = Color3.fromRGB(
+		math.floor(r),
+		math.floor(g),
+		math.floor(b)
+	)
+
+	rightsName.TextColor3 = color
+	mini.TextColor3 = color
+end)
